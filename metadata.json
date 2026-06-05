@@ -1,0 +1,6 @@
+{
+  "name": "Yo-Yo Tracker",
+  "description": "Yo-Yo IR1 Live Dashboard & Tracker",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
