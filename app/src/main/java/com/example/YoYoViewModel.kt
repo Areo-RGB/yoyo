@@ -20,7 +20,10 @@ data class Shuttle(
     val speed: Double,
     val runTime: Double,
     val restTime: Double,
-    val accumulatedDistance: Double
+    val accumulatedDistance: Double,
+    val startTime: Double = 0.0,
+    val startRestTime: Double = 0.0,
+    val endTime: Double = 0.0
 )
 
 enum class Phase { IDLE, RUN, REST, DONE }
@@ -39,7 +42,8 @@ data class TrackerState(
     val phaseElapsed: Double = 0.0,
     val isPlaying: Boolean = false,
     val participants: List<Participant>,
-    val globalLiveDistance: Double = 0.0
+    val globalLiveDistance: Double = 0.0,
+    val totalTimeElapsed: Double = 0.0
 ) {
     val shuttles: List<Shuttle> = generateShuttles()
     val currentShuttle: Shuttle = shuttles[min(currentShuttleIndex, shuttles.size - 1)]
@@ -70,20 +74,31 @@ data class TrackerState(
             )
             val shuttles = mutableListOf<Shuttle>()
             var accDistance = 0.0
+            var currentTime = 0.0
             for (def in protocolDefs) {
                 for (i in 1..def.shuttles) {
                     accDistance += 40.0
                     val runTime = 40.0 / (def.speed / 3.6)
+                    val restTime = 10.0
+                    
+                    val startTime = currentTime
+                    val startRestTime = startTime + runTime
+                    val endTime = startRestTime + restTime
+                    
                     shuttles.add(
                         Shuttle(
                             level = def.level,
                             shuttleNum = i,
                             speed = def.speed,
                             runTime = runTime,
-                            restTime = 10.0,
-                            accumulatedDistance = accDistance
+                            restTime = restTime,
+                            accumulatedDistance = accDistance,
+                            startTime = startTime,
+                            startRestTime = startRestTime,
+                            endTime = endTime
                         )
                     )
+                    currentTime = endTime
                 }
             }
             return shuttles
@@ -100,6 +115,7 @@ class YoYoViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(TrackerState(participants = TrackerState.initialParticipants()))
     val uiState: StateFlow<TrackerState> = _uiState.asStateFlow()
 
+    var isAudioMode = false
     private var timerJob: Job? = null
     private var lastTimestamp: Long = 0
 
@@ -115,6 +131,8 @@ class YoYoViewModel : ViewModel() {
 
     private fun start() {
         _uiState.update { it.copy(isPlaying = true) }
+        if (isAudioMode) return
+        
         lastTimestamp = System.currentTimeMillis()
         timerJob = viewModelScope.launch {
             while (isActive) {
@@ -127,7 +145,7 @@ class YoYoViewModel : ViewModel() {
         }
     }
 
-    private fun pause() {
+    fun pause() {
         _uiState.update { it.copy(isPlaying = false) }
         timerJob?.cancel()
     }
@@ -142,54 +160,56 @@ class YoYoViewModel : ViewModel() {
     private fun tick(delta: Double) {
         _uiState.update { state ->
             if (!state.isPlaying) return@update state
+            val newTotalTime = state.totalTimeElapsed + delta
+            calculateStateForTime(state, newTotalTime, true)
+        }
+    }
 
-            var newPhase = state.phase
-            var newPhaseElapsed = state.phaseElapsed
-            var newIndex = state.currentShuttleIndex
-            var newIsPlaying = state.isPlaying
+    fun syncToAudioTime(totalSeconds: Double) {
+        _uiState.update { state ->
+            calculateStateForTime(state, totalSeconds, state.isPlaying)
+        }
+    }
 
-            if (newPhase == Phase.IDLE) {
-                newPhase = Phase.RUN
-                newPhaseElapsed = 0.0
-            }
-
-            newPhaseElapsed += delta
-            var currentShuttle = state.shuttles[min(newIndex, state.shuttles.size - 1)]
-            var phaseDuration = if (newPhase == Phase.RUN) currentShuttle.runTime else currentShuttle.restTime
-
-            if (newPhaseElapsed >= phaseDuration) {
-                if (newPhase == Phase.RUN) {
-                    newPhase = Phase.REST
-                    newPhaseElapsed = 0.0
-                } else if (newPhase == Phase.REST) {
-                    newPhase = Phase.RUN
-                    newPhaseElapsed = 0.0
-                    newIndex++
-                    if (newIndex >= state.shuttles.size) {
-                        newPhase = Phase.DONE
-                        newIsPlaying = false
-                    }
-                }
-            }
-
-            // Recalculate distance
-            currentShuttle = state.shuttles[min(newIndex, state.shuttles.size - 1)]
-            var dist = currentShuttle.accumulatedDistance
-            if (newPhase == Phase.RUN) {
-                dist -= 40.0
-                dist += 40.0 * min(1.0, newPhaseElapsed / currentShuttle.runTime)
-            } else if (newPhase == Phase.IDLE) {
-                dist = 0.0
-            }
-
-            state.copy(
-                phase = newPhase,
-                phaseElapsed = newPhaseElapsed,
-                currentShuttleIndex = newIndex,
-                isPlaying = newIsPlaying,
-                globalLiveDistance = dist
+    private fun calculateStateForTime(state: TrackerState, totalSeconds: Double, isPlaying: Boolean): TrackerState {
+        if (totalSeconds < 0) return state
+        
+        var foundIndex = state.shuttles.indexOfFirst { totalSeconds < it.endTime }
+        if (foundIndex == -1) {
+            val lastShuttle = state.shuttles.last()
+            return state.copy(
+                phase = Phase.DONE,
+                isPlaying = false,
+                phaseElapsed = 0.0,
+                currentShuttleIndex = state.shuttles.size - 1,
+                totalTimeElapsed = lastShuttle.endTime,
+                globalLiveDistance = lastShuttle.accumulatedDistance
             )
         }
+        
+        val shuttle = state.shuttles[foundIndex]
+        val phase: Phase
+        val phaseElapsed: Double
+        var dist = shuttle.accumulatedDistance - 40.0
+        
+        if (totalSeconds < shuttle.startRestTime) {
+            phase = Phase.RUN
+            phaseElapsed = totalSeconds - shuttle.startTime
+            dist += 40.0 * min(1.0, phaseElapsed / shuttle.runTime)
+        } else {
+            phase = Phase.REST
+            phaseElapsed = totalSeconds - shuttle.startRestTime
+            dist += 40.0
+        }
+        
+        return state.copy(
+            phase = phase,
+            phaseElapsed = phaseElapsed,
+            currentShuttleIndex = foundIndex,
+            totalTimeElapsed = totalSeconds,
+            globalLiveDistance = dist,
+            isPlaying = isPlaying
+        )
     }
 
     fun onParticipantClick(participant: Participant) {
@@ -201,7 +221,7 @@ class YoYoViewModel : ViewModel() {
                         ParticipantState.ACTIVE -> p.copy(state = ParticipantState.WARNED)
                         ParticipantState.WARNED -> p.copy(
                             state = ParticipantState.SAVED,
-                            savedDistance = state.globalLiveDistance.toInt()
+                            savedDistance = (state.globalLiveDistance / 20.0).toInt() * 20
                         )
                         ParticipantState.SAVED -> p
                     }

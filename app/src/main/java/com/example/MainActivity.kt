@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,11 +26,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import com.example.ui.theme.*
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val viewModel: YoYoViewModel by viewModels()
@@ -38,12 +43,80 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
+            val context = LocalContext.current
+            val tts = remember { mutableStateOf<TextToSpeech?>(null) }
+            
+            DisposableEffect(context) {
+                val textToSpeech = TextToSpeech(context) { status ->
+                    if (status == TextToSpeech.SUCCESS) {
+                        tts.value?.language = Locale.US
+                    }
+                }
+                tts.value = textToSpeech
+                onDispose {
+                    textToSpeech.stop()
+                    textToSpeech.shutdown()
+                }
+            }
+
+            val mediaPlayer = remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+            
+            DisposableEffect(context) {
+                val resId = context.resources.getIdentifier("yoyo", "raw", context.packageName)
+                if (resId != 0) {
+                    val mp = android.media.MediaPlayer.create(context, resId)
+                    viewModel.isAudioMode = true
+                    mediaPlayer.value = mp
+                }
+                
+                onDispose {
+                    mediaPlayer.value?.release()
+                }
+            }
+
             MyApplicationTheme(dynamicColor = false) {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     containerColor = BgColor
                 ) { innerPadding ->
                     val state by viewModel.uiState.collectAsState()
+
+                    LaunchedEffect(state.isPlaying) {
+                        if (state.isPlaying) {
+                            mediaPlayer.value?.start()
+                        } else {
+                            mediaPlayer.value?.pause()
+                        }
+                    }
+                    
+                    LaunchedEffect(state.totalTimeElapsed, state.isPlaying) {
+                        if (state.totalTimeElapsed == 0.0 && !state.isPlaying) {
+                            mediaPlayer.value?.seekTo(0)
+                        }
+                    }
+                    
+                    LaunchedEffect(Unit) {
+                        while (isActive) {
+                            kotlinx.coroutines.delay(16)
+                            val mp = mediaPlayer.value
+                            if (mp != null && mp.isPlaying) {
+                                viewModel.syncToAudioTime(mp.currentPosition / 1000.0)
+                            }
+                        }
+                    }
+                    val displayedDistance = (state.globalLiveDistance / 20.0).toInt() * 20
+                    
+                    var lastAnnouncedDistance by remember { mutableIntStateOf(0) }
+                    
+                    LaunchedEffect(displayedDistance) {
+                        if (displayedDistance % 80 == 0 && displayedDistance > 0 && displayedDistance != lastAnnouncedDistance) {
+                            lastAnnouncedDistance = displayedDistance
+                            tts.value?.speak("$displayedDistance meters", TextToSpeech.QUEUE_FLUSH, null, null)
+                        }
+                        if (displayedDistance == 0) {
+                            lastAnnouncedDistance = 0
+                        }
+                    }
                     
                     BoxWithConstraints(
                         modifier = Modifier
@@ -62,6 +135,7 @@ class MainActivity : ComponentActivity() {
                                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                                     DashboardPanel(
                                         state = state,
+                                        displayedDistance = displayedDistance,
                                         onStartPause = viewModel::togglePlayPause,
                                         onReset = viewModel::reset
                                     )
@@ -84,6 +158,7 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 DashboardPanel(
                                     state = state,
+                                    displayedDistance = displayedDistance,
                                     onStartPause = viewModel::togglePlayPause,
                                     onReset = viewModel::reset
                                 )
@@ -103,6 +178,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun DashboardPanel(
     state: TrackerState,
+    displayedDistance: Int,
     onStartPause: () -> Unit,
     onReset: () -> Unit
 ) {
@@ -228,7 +304,7 @@ fun DashboardPanel(
                 Spacer(modifier = Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.Bottom) {
                     Text(
-                        text = state.globalLiveDistance.toInt().toString(), color = AccentDist,
+                        text = displayedDistance.toString(), color = AccentDist,
                         fontWeight = FontWeight.Bold, fontSize = 24.sp,
                         modifier = Modifier.alignByBaseline()
                     )
