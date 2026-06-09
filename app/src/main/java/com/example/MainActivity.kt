@@ -62,7 +62,7 @@ class MainActivity : ComponentActivity() {
             val mediaPlayer = remember { mutableStateOf<android.media.MediaPlayer?>(null) }
             
             DisposableEffect(context) {
-                val resId = context.resources.getIdentifier("yoyo", "raw", context.packageName)
+                val resId = context.resources.getIdentifier("track", "raw", context.packageName)
                 if (resId != 0) {
                     val mp = android.media.MediaPlayer.create(context, resId)
                     viewModel.isAudioMode = true
